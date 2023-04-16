@@ -1,0 +1,23 @@
+[package]
+name = "rulebook-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tap.workspace = true
+clap.workspace = true
+
+axum = {version = "0.6", features = ["ws"]}
+rand = "0.8"
+base64 = "0.21"
+async-trait = "0.1"
+fastrand = "1.9"
+
+rulebook-runtime = {path = "../rulebook-runtime"}

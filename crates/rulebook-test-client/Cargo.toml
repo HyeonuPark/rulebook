@@ -1,0 +1,22 @@
+[package]
+name = "rulebook-test-client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rulebook-runtime = {path = "../rulebook-runtime"}
+
+anyhow.workspace = true
+futures.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-channel.workspace = true
+clap.workspace = true
+
+fastrand = "1.9"
+async-trait = "0.1"
+tokio-tungstenite = "0.18"

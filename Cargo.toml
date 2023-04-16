@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rulebook-interface-types",
+    "crates/rulebook-runtime",
+    "crates/rulebook-server",
+    "crates/rulebook-test-client",
+]
+exclude = [
+    "crates/rulebook",
+    "crates/example-guessing-game",
+]
+
+[workspace.dependencies]
+anyhow = {version = "1.0", features = ["backtrace"]}
+serde = {version = "1.0", features = ["derive"]}
+serde_json = {version = "1.0", features = ["preserve_order", "float_roundtrip", "raw_value"]}
+futures = "0.3"
+tokio = {version = "1.26", features = ["full"]}
+bytes = "1.4"
+async-channel = "1.8"
+tap = "1.0"
+clap = {version = "4.1", features = ["derive", "env"]}
