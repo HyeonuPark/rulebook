@@ -122,63 +122,69 @@ impl Session {
         } = self.conf;
 
         let handler = Arc::new(Mutex::new(handler));
-        let func_trigger_io = Func::wrap7_async(
+        let func_trigger_io = Func::wrap1_async(
             &mut self.store,
-            move |mut caller: Caller<'_, _>,
-                  _wait_slot: u32,
-                  input_ptr: u32,
-                  input_cap: u32,
-                  output_ptr: u32,
-                  output_len: u32,
-                  state_ptr: u32,
-                  state_len: u32| {
+            move |mut caller: Caller<'_, _>, params_ptr: u32| {
                 let handler = handler.clone();
 
                 Box::new(async move {
                     let Some(Extern::Memory(memory)) = caller.get_export("memory") else {
                         anyhow::bail!("wasm memory is not exported under the name `memory`")
                     };
-                    let output: Output<&RawValue> = {
+                    let (input_ptr, input_cap, output): (usize, usize, Output<Box<RawValue>>) = {
+                        use bytes::Buf;
+
+                        let params_len = 4 * std::mem::size_of::<u32>() as u32;
+                        let mut params = slice(&memory, &caller, params_ptr, params_len);
+
+                        let input_ptr = params.get_u32_ne();
+                        let input_cap = params.get_u32_ne();
+                        let output_ptr = params.get_u32_ne();
+                        let output_len = params.get_u32_ne();
+
                         let output = slice_str(&memory, &caller, output_ptr, output_len)?;
-                        let state = slice_str(&memory, &caller, state_ptr, state_len)?;
+                        println!("got wasm output: {output}");
 
-                        if enable_state {
-                            let state: &RawValue = serde_json::from_str(state)?;
-                            handler.lock().await.state(state)?;
-                        }
-
-                        serde_json::from_str(output)?
+                        (
+                            input_ptr as _,
+                            input_cap as _,
+                            serde_json::from_str(output)?,
+                        )
                     };
 
                     let json = match output {
                         Output::Error(msg) => anyhow::bail!("game logic error: {msg}"),
                         Output::SessionStart => serde_json::to_string(caller.data())?,
                         Output::SessionEnd => serde_json::to_string(&())?,
-                        Output::Pause => {
-                            if enable_logging {
-                                println!("PAUSE");
+                        Output::UpdateState(state) => {
+                            if enable_state {
+                                handler.lock().await.state(&state)?;
                             }
                             serde_json::to_string(&())?
                         }
-                        Output::DoTaskIf(allowed) => {
+                        Output::DoTaskIf { allowed } => {
                             let result = handler.lock().await.do_task_if(allowed).await?;
                             serde_json::to_string(&result)?
                         }
                         Output::TaskDone { targets, value } => {
-                            handler.lock().await.task_done(targets, value).await?;
+                            handler.lock().await.task_done(targets, &value).await?;
                             serde_json::to_string(&())?
                         }
                         Output::Random { start, end } => {
                             let result = handler.lock().await.random(start, end).await?;
                             serde_json::to_string(&result)?
                         }
-                        Output::Action { from, param } => {
-                            handler.lock().await.action(from, param).await?.get().into()
-                        }
+                        Output::Action { from, param } => handler
+                            .lock()
+                            .await
+                            .action(from, &param)
+                            .await?
+                            .get()
+                            .into(),
                     };
 
-                    anyhow::ensure!(json.len() <= input_cap as usize);
-                    memory.write(&mut caller, input_ptr as usize, json.as_bytes())?;
+                    anyhow::ensure!(json.len() <= input_cap);
+                    memory.write(&mut caller, input_ptr, json.as_bytes())?;
                     Ok(json.len() as u32)
                 })
             },

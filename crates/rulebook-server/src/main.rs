@@ -58,7 +58,10 @@ struct Connection {
 }
 
 fn new_runtime(games: &[PathBuf]) -> Result<Runtime> {
-    let runtime = Runtime::new(Default::default())?;
+    let runtime = Runtime::new(rulebook_runtime::Config {
+        enable_state: false,
+        enable_logging: true,
+    })?;
 
     for game in games {
         let file = std::fs::read(game)?;
@@ -98,6 +101,7 @@ impl Room {
         let conns: Result<HashMap<_, _>> = stream::iter(conns)
             .map(|conn| async {
                 let conn = conn;
+                println!("got pid: {}", conn.player_id);
                 let mut chan = Channel::new(WebSocketStream::new(conn.ws.await?));
                 chan.send(&SessionInfo {
                     room: RoomInfo {
@@ -185,6 +189,7 @@ impl OutputHandler for Room {
     }
 
     async fn action(&mut self, from: PlayerId, _param: &RawValue) -> Result<Box<RawValue>> {
+        println!("action from {from} with {_param:?}");
         let value: Box<RawValue> = self.chan(from)?.receive().await?;
         let mut scope = self.scope();
         scope.retain(|&p| p != from);

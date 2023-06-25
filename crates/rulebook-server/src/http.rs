@@ -21,6 +21,7 @@ pub(crate) async fn run_server(server: Arc<Server>, addr: SocketAddr) {
             "/room",
             post(
                 |State(server): State<Arc<Server>>, Json(req): Json<CreateRoomRequest>| async move {
+                    println!("/room, req: {req:?}");
                     let room_id = new_id();
                     let session = match server.runtime.new_session(&req.game).await {
                         Ok(s) => s,
@@ -57,6 +58,7 @@ pub(crate) async fn run_server(server: Arc<Server>, addr: SocketAddr) {
                  Path(room_id): Path<String>,
                  Query(query): Query<ConnectQuery>,
                  ws_conn: WebSocketUpgrade| async move {
+                    println!("/room/{room_id}/connect, q: {query:?}");
                     let Some(room) = server.rooms.read().unwrap().get(&room_id).cloned() else {
                         return (StatusCode::NOT_FOUND, "room not found").into_response();
                     };

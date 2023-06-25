@@ -1,6 +1,7 @@
 #![deny(clippy::float_arithmetic)]
 
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::RefCell;
+use std::fmt::Debug;
 
 use anyhow::Result;
 use scoped_tls::scoped_thread_local;
@@ -13,26 +14,43 @@ pub use {anyhow, serde, serde_json};
 pub use rulebook_interface_types::{PlayerId, RoomInfo};
 
 struct Context {
-    wait_slot: UnsafeCell<i32>,
     input: Box<[u8]>,
     output: Vec<u8>,
-    state: Vec<u8>,
     print_state: bool,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct IoParams {
+    pub input_ptr: *mut u8,
+    pub input_cap: usize,
+    pub output_ptr: *const u8,
+    pub output_len: usize,
+}
+
+impl IoParams {
+    pub fn new(input: &mut [u8], output: &[u8]) -> Self {
+        log!(
+            "ioparam, input: {:p}-{}, output: {:p}-{}",
+            input.as_ptr(),
+            input.len(),
+            output.as_ptr(),
+            output.len()
+        );
+        IoParams {
+            input_ptr: input.as_mut_ptr(),
+            input_cap: input.len(),
+            output_ptr: output.as_ptr(),
+            output_len: output.len(),
+        }
+    }
 }
 
 scoped_thread_local!(static CONTEXT: RefCell<Context>);
 
 extern "C" {
     #[doc(hidden)]
-    pub fn rulebook_trigger_io(
-        wait_slot: *const UnsafeCell<i32>,
-        input_ptr: *mut u8,
-        input_cap: usize,
-        output_ptr: *const u8,
-        output_len: usize,
-        state_ptr: *const u8,
-        state_len: usize,
-    ) -> usize;
+    pub fn rulebook_trigger_io(params: *const IoParams) -> usize;
 
     #[doc(hidden)]
     pub fn rulebook_log(msg_ptr: *const u8, msg_len: usize);
@@ -40,7 +58,7 @@ extern "C" {
 
 fn perform_io_raw<I, O>(out: Output<O>) -> Result<I>
 where
-    I: DeserializeOwned,
+    I: DeserializeOwned + Debug,
     O: Serialize,
 {
     CONTEXT.with(|ctx| {
@@ -49,17 +67,7 @@ where
         ctx.output.clear();
         serde_json::to_writer(&mut ctx.output, &out)?;
 
-        let input_len = unsafe {
-            rulebook_trigger_io(
-                &ctx.wait_slot,
-                ctx.input.as_mut_ptr(),
-                ctx.input.len(),
-                ctx.output.as_ptr(),
-                ctx.output.len(),
-                ctx.state.as_ptr(),
-                ctx.state.len(),
-            )
-        };
+        let input_len = unsafe { rulebook_trigger_io(&IoParams::new(&mut ctx.input, &ctx.output)) };
         assert!(input_len <= ctx.input.len());
 
         let input = serde_json::from_slice(&ctx.input[..input_len])?;
@@ -68,24 +76,32 @@ where
     })
 }
 
-fn report_error<T>(res: Result<T>) -> T {
-    match res {
-        Ok(v) => v,
+fn report_error<T>(f: impl FnOnce() -> Result<T>) -> T {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let err = match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(v)) => return v,
+        Ok(Err(err)) => err,
         Err(err) => {
-            _ = perform_io_raw::<(), ()>(Output::Error(format!("{err:?}")));
-            unreachable!(
-                "rulebook_trigger_io imported function should not return after error output"
-            );
+            if let Some(err) = err.downcast_ref::<String>() {
+                anyhow::anyhow!("{err}")
+            } else if let Some(err) = err.downcast_ref::<&'static str>() {
+                anyhow::anyhow!("{err}")
+            } else {
+                anyhow::anyhow!("unknown panic msg")
+            }
         }
-    }
+    };
+    _ = perform_io_raw::<(), ()>(Output::Error(format!("{err:?}")));
+    unreachable!("rulebook_trigger_io imported function should not return after error output");
 }
 
 fn perform_io<I, O>(out: Output<O>) -> I
 where
-    I: DeserializeOwned,
+    I: DeserializeOwned + Debug,
     O: Serialize,
 {
-    report_error(perform_io_raw(out))
+    report_error(|| perform_io_raw(out))
 }
 
 #[macro_export]
@@ -101,15 +117,7 @@ macro_rules! setup {
         pub unsafe extern "C" fn rulebook_dummy_function_to_enforce_linkage() {
             use std::ptr;
 
-            $crate::rulebook_trigger_io(
-                ptr::null(),
-                ptr::null_mut(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
-            );
+            $crate::rulebook_trigger_io(ptr::null());
             $crate::rulebook_log(ptr::null(), 0);
         }
     };
@@ -122,50 +130,56 @@ macro_rules! log {
     };
 }
 
-#[derive(Debug, Default)]
-pub struct State<T> {
-    inner: T,
+#[derive(Debug)]
+pub struct Store<T> {
+    state: T,
 }
 
-impl<T: Serialize> State<T> {
+impl<T: Serialize> Store<T> {
     pub fn get(&self) -> &T {
-        &self.inner
+        &self.state
+    }
+
+    pub fn mutate(&mut self, f: impl FnOnce(&mut T)) {
+        f(&mut self.state);
+
+        CONTEXT.with(|ctx| {
+            let print_state = ctx.borrow().print_state;
+
+            if print_state {
+                let () = perform_io(Output::UpdateState(&self.state));
+            }
+        });
     }
 
     pub fn set(&mut self, new_state: T) {
-        CONTEXT.with(|ctx| {
-            let mut ctx = ctx.borrow_mut();
-
-            if ctx.print_state {
-                ctx.state.clear();
-                serde_json::to_writer(&mut ctx.state, &new_state)
-                    .expect("failed to serialize state");
-            }
-        });
-
-        self.inner = new_state;
+        self.mutate(|inner| *inner = new_state)
     }
+}
+
+pub trait State: Serialize {
+    fn from_room_info(room_info: &RoomInfo) -> Self;
 }
 
 pub fn start_session<F, S>(input_cap: usize, print_state: bool, game: F)
 where
-    F: FnOnce(&RoomInfo, &mut State<S>) -> Result<()>,
-    S: Serialize + Default,
+    F: FnOnce(&RoomInfo, &mut Store<S>) -> Result<()>,
+    S: State,
 {
-    let mut state = State::default();
-
     let ctx = RefCell::new(Context {
-        wait_slot: UnsafeCell::new(0),
         input: vec![0; input_cap].into_boxed_slice(),
         output: serde_json::to_vec(&()).unwrap(),
-        state: serde_json::to_vec(state.get()).unwrap(),
         print_state,
     });
 
     CONTEXT.set(&ctx, || {
         let room: RoomInfo = perform_io(Output::SessionStart::<()>);
+        let mut store = Store {
+            state: S::from_room_info(&room),
+        };
+        let () = perform_io(Output::UpdateState(store.get()));
 
-        report_error(game(&room, &mut state));
+        report_error(|| game(&room, &mut store));
 
         let () = perform_io(Output::SessionEnd::<()>);
     })
@@ -175,21 +189,16 @@ pub fn log(msg: &str) {
     unsafe { rulebook_log(msg.as_ptr(), msg.len()) }
 }
 
-pub fn pause() {
-    perform_io(Output::Pause::<()>)
-}
-
 pub fn random(start: i32, end: i32) -> i32 {
+    assert!(start <= end, "start > end");
     perform_io(Output::Random::<()> { start, end })
 }
 
 pub fn do_if<F: FnOnce() -> T, T>(targets: Vec<PlayerId>, f: F) -> Option<T> {
-    match perform_io(Output::DoTaskIf::<()>(targets)) {
+    match perform_io(Output::DoTaskIf::<()> { allowed: targets }) {
         TaskResult::DoTask => {} // proceed
         TaskResult::SyncResult(()) => {
-            report_error(Err::<(), _>(anyhow::anyhow!(
-                "unexpected syncResult response"
-            )));
+            report_error(|| Err::<(), _>(anyhow::anyhow!("unexpected syncResult response")));
             unreachable!();
         }
         TaskResult::Restricted => return None,
@@ -211,9 +220,9 @@ pub fn do_if_admin<F: FnOnce() -> T, T>(f: F) -> Option<T> {
 pub fn sync_admin_if<F, T>(targets: Vec<PlayerId>, f: F) -> Option<T>
 where
     F: FnOnce() -> T,
-    T: Serialize + DeserializeOwned + Clone,
+    T: Serialize + DeserializeOwned + Clone + Debug,
 {
-    match perform_io(Output::DoTaskIf::<()>(vec![])) {
+    match perform_io(Output::DoTaskIf::<()> { allowed: vec![] }) {
         TaskResult::DoTask => {} // proceed
         TaskResult::SyncResult(v) => return Some(v),
         TaskResult::Restricted => return None,
@@ -230,7 +239,7 @@ where
 
 pub fn action<I, O>(from: PlayerId, param: O) -> I
 where
-    I: DeserializeOwned,
+    I: DeserializeOwned + Debug,
     O: Serialize,
 {
     perform_io(Output::Action { from, param })

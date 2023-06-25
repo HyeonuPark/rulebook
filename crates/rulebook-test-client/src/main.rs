@@ -52,8 +52,7 @@ async fn main() -> Result<()> {
     runtime.add_game(game_name.into(), &std::fs::read(&args.game)?)?;
 
     // TODO: use url crate
-    let mut addr = args.addr.clone();
-    addr.push_str(&format!("?color={}", args.player));
+    let addr = format!("{}?color={}", args.addr, args.player);
     let (ws, _resp) = connect_async(addr).await.context("ws connect failed")?;
     anyhow::ensure!(_resp.status().as_u16() < 300, "err resp: {_resp:?}");
     let mut chan = Channel::new(websocket::WebSocketStream::new(ws));
@@ -82,7 +81,6 @@ struct Agent {
     player_id: PlayerId,
     chan: Channel<websocket::WebSocketStream>,
     receiver: async_channel::Receiver<String>,
-    // visib: Vec<Vec<PlayerId>>,
 }
 
 #[async_trait::async_trait]

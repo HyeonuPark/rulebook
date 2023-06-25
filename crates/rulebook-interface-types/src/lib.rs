@@ -1,20 +1,20 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
 pub enum Output<T> {
     Error(String),
     SessionStart,
     SessionEnd,
-    Pause,
-    DoTaskIf(Vec<PlayerId>),
+    UpdateState(T),
+    DoTaskIf { allowed: Vec<PlayerId> },
     TaskDone { targets: Vec<PlayerId>, value: T },
     Random { start: i32, end: i32 },
     Action { from: PlayerId, param: T },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
 pub enum TaskResult<T> {
     DoTask,
     SyncResult(T),

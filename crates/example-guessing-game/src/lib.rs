@@ -3,18 +3,20 @@ use std::cmp::{self, Ord};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use rulebook::{action, do_if_admin, log, pause, random, sync_admin_if, PlayerId, RoomInfo};
+use rulebook::{action, do_if_admin, random, sync_admin_if, PlayerId, RoomInfo, Store};
 
 rulebook::setup!(run);
 
-fn run(room: &RoomInfo, state: &mut rulebook::State<State>) -> Result<()> {
+fn run(room: &RoomInfo, store: &mut Store<State>) -> Result<()> {
     let target = do_if_admin(|| random(1, 99));
 
-    for &turn in room.players.iter().cycle() {
-        state.set(State::TurnStart { turn });
-
-        let guess: i32 = action(turn, Action::Guess);
-        state.set(State::Guessing { turn, guess });
+    loop {
+        let turn_player = store.get().turns[0].player;
+        let guess: i32 = action(turn_player, "Guess");
+        store.mutate(|s| {
+            s.turns[0].guess = Some(guess);
+            s.turns[0].result = None;
+        });
 
         let result: Ordering = sync_admin_if(room.players.clone(), || {
             Ord::cmp(&target.unwrap(), &guess).into()
@@ -23,43 +25,49 @@ fn run(room: &RoomInfo, state: &mut rulebook::State<State>) -> Result<()> {
 
         match result {
             Ordering::Equal => {
-                state.set(State::Done { winner: turn });
+                store.mutate(|s| {
+                    s.turns[0].result = Some(result);
+                    s.winner = Some(turn_player);
+                });
                 return Ok(());
             }
-            _ => {
-                state.set(State::Failed { turn, result });
-                log!("player {turn} guessed {guess} but failed - {result:?}");
-                pause();
-            }
+            _ => store.mutate(|s| {
+                s.turns[0].result = Some(result);
+                s.turns.rotate_left(1);
+            }),
         }
     }
-
-    Ok(())
 }
 
 #[derive(Default, Serialize)]
-enum State {
-    #[default]
-    Init,
-    TurnStart {
-        turn: PlayerId,
-    },
-    Guessing {
-        turn: PlayerId,
-        guess: i32,
-    },
-    Failed {
-        turn: PlayerId,
-        result: Ordering,
-    },
-    Done {
-        winner: PlayerId,
-    },
+#[serde(tag = "type")]
+struct State {
+    turns: Vec<Turn>,
+    winner: Option<PlayerId>,
 }
 
-#[derive(Serialize)]
-enum Action {
-    Guess,
+impl rulebook::State for State {
+    fn from_room_info(room_info: &RoomInfo) -> Self {
+        State {
+            turns: room_info
+                .players
+                .iter()
+                .map(|&player| Turn {
+                    player,
+                    guess: None,
+                    result: None,
+                })
+                .collect(),
+            winner: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct Turn {
+    player: PlayerId,
+    guess: Option<i32>,
+    result: Option<Ordering>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
